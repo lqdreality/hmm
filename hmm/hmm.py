@@ -2,118 +2,6 @@ import numpy as np
 from scipy.stats import multivariate_normal
 import pandas as pd
 
-def lse(x,axis=None) :
-	if axis is None :
-		x_max = np.max(x)
-		return x_max + np.log(np.sum(np.exp(x-x_max)))
-	else :
-		x_max = np.max(x,axis=axis)
-		return x_max + np.log(np.sum(np.exp(x-x_max[:,np.newaxis]),axis=axis))
-
-def forwards_backwards(X,
-	                   A,
-	                   pi,
-	                   emission,
-	                   emission_params={},
-	                   likelihood=False,
-	                   return_normed=True,
-	                   log_sum_exp=False,
-	                   ppp=False) :
-	# Assume inputs are np.arrays for now
-	K = A.shape[0]
-	assert K == len(pi)
-	if type(X) == list :
-		N = len(X)
-		X = np.array(X)
-	elif type(X) == np.ndarray :
-		N = X.shape[0]
-	
-	emissions = np.zeros((N,K))
-	for n in range(N) :
-		for k in range(K) :
-			emissions[n,k] = emission(X[n,:],k,params=emission_params)
-	
-	alphas = np.zeros((N,K))
-	betas  = np.zeros((N,K))
-	if log_sum_exp :
-		betas[-1,:] = 0.
-	else :
-		betas[-1,:] = 1.
-
-	#\alpha(z_1) = p(x_1,z_1) = p(x_1|z_1)p(z_1)
-	for k in range(K) :
-		if log_sum_exp :
-			alphas[0,k] = np.log(pi[k]) + np.log(emissions[0,k])
-		else :
-			alphas[0,k] = pi[k]*emissions[0,k]
-
-	for na,nb in zip(range(1,N),reversed(range(N-1))) :
-		for k in range(K) :
-			if log_sum_exp :
-				alphas[na,k] = np.log(emissions[na,k])+lse(alphas[na-1,:]+np.log(A[:,k]))
-				betas[nb,k] = lse(np.log(emissions[nb+1,:])+betas[nb+1,:]+np.log(A[k,:]))
-			else :
-				alphas[na,k] = emissions[na,k]*np.sum(alphas[na-1,:]*A[:,k])
-				betas[nb,k] = np.sum(emissions[nb+1,:]*betas[nb+1,:]*A[k,:])
-
-	#print(emissions)
-	#print(np.sum(alphas == 0,axis=1))
-	#print(np.sum(betas == 0,axis=1))
-	#\gamma(\bm{z}_i) = \frac{1}{p(\bm{X})}\alpha(\bm{z}_i)\beta(\bm{z}_i)
-	#p(\bm{X}) = \sum_{\bm{z}_j\in Supp(\bm{z})}\alpha(\bm{z}_i)\beta(\bm{z}_i)
-	#Note that p(\bm{X}) is also is a function of where you are on the chain (since it's effectively
-	#normalizing the product \alpha(\bm{z}_i)\beta(\bm{z}_i)). So I find it easier to think of the following
-	#p(\bm{X}) = Z(\bm{X},i)
-	#\gamma(\bm{z}_i) = \frac{1}{Z(\bm{X},i)}\alpha(\bm{z}_i)\beta(\bm{z}_i)
-	if log_sum_exp :
-		gamma_no_norm = alphas + betas
-	else :
-		gamma_no_norm = alphas*betas
-	if return_normed :
-		if log_sum_exp :
-			gammas = gamma_no_norm-lse(gamma_no_norm,axis=1)[:,np.newaxis]
-		else :
-			gammas = gamma_no_norm/np.sum(gamma_no_norm,axis=1)[:,np.newaxis]
-	#\xi(\bm{z}_{i-1},\bm{z}_i) = \frac{1}{p(\bm{X})}\alpha(\bm{z}_{i-1})
-	#\beta(\bm{z}_i)p(\bm{x}_i|\bm{z}_i)p(\bm{z}_i|\bm{z}_{i-1})
-	xi_no_norm = np.zeros((N-1,K,K))
-	if return_normed :
-		xis = xi_no_norm.copy()
-	for n in range(1,N) :
-		for k in range(K) :
-			if log_sum_exp :
-				#xi_no_norm[n-1,k,:] = alphas[n-1,k]+betas[n,:]+emissions[n,:]+A[k,:]
-				xi_no_norm[n-1,k,:] = alphas[n-1,k]+betas[n,:]+np.log(emissions[n,:])+np.log(A[k,:])
-			else :
-				xi_no_norm[n-1,k,:] = alphas[n-1,k]*betas[n,:]*emissions[n,:]*A[k,:]
-		if return_normed :
-			if log_sum_exp :
-				xis[n-1,:,:] =  xi_no_norm[n-1,:,:]-lse(xi_no_norm[n-1,:,:])
-			else :
-				xis[n-1,:,:] =  xi_no_norm[n-1,:,:]/np.sum(xi_no_norm[n-1,:,:])
-			#denominator = np.dot(np.dot(alpha[t, :].T, a) * b[:, V[t + 1]].T, beta[t + 1, :])
-	#print(xis[5,:,:])
-	#print(np.sum(xis,axis=(0,1)))
-	#gammas = np.sum(xis,axis=1)
-	#print(gammas[0,:])
-
-	if likelihood :
-		if log_sum_exp :
-			l = np.sum(np.exp(alphas[-1,:]))
-		else :
-			l = np.sum(alphas[-1,:])
-
-	if not return_normed :
-		if likelihood :
-			return gamma_no_norm,xi_no_norm,l
-		else :
-			return gamma_no_norm,xi_no_norm,None
-	else :
-		if likelihood :
-			return gammas,xis,l
-		else :
-			return gammas,xis,None
-
 class HMM :
 	def __init__(self,
 		         A=None,
@@ -122,6 +10,7 @@ class HMM :
 		self.A = A
 		self.pi = pi
 		self.emissions = emissions
+		self.alphas = None
 
 	def lse(self,x,axis=None) :
 		if axis is None :
@@ -157,6 +46,34 @@ class HMM :
 				else :
 					old_likelihood = np.log(likelihood)
 				"""
+	def predictive_distribution(self,xnew,emission_params={},log_space=False) :
+		if self.alphas is None :
+			raise
+		K = self.A.shape[0]
+		numerator = 0.
+		for k in range(K) :
+			transition = 0.
+			for j in range(K) :
+				transition += self.A[j,k]*self.alphas[-1,j]
+			numerator += self.emit(xnew,k,params=emission_params)*transition
+		return numerator/np.sum(self.alphas[-1,:])
+
+	def posterior_distribution(self,log_space=False) :
+		K = self.A.shape[0]
+		posterior = np.zeros(K,)
+		if log_space :
+			denom = self.lse(self.alphas[-1,:])
+		else :
+			denom = np.sum(self.alphas[-1,:])
+		for k in range(K) :
+			if log_space :
+				posterior[k] = self.lse(self.A[:,k] + self.alphas[-1,:])
+			else :
+				posterior[k] = np.sum(self.A[:,k]*self.alphas[-1,:])
+		if log_space :
+			return posterior - denom
+		else :
+			return posterior/denom
 
 	def forwards_backwards(self,
 		                   X,
@@ -205,6 +122,7 @@ class HMM :
 					betas[nb,k] = np.sum(emissions[nb+1,:]*\
 						                 betas[nb+1,:]*\
 						                 self.A[k,:])
+		self.alphas = alphas.copy()
 		### Calculate Responsibilities (Gammas) p(\bm{z}_i|\bm{X})###
 		#\gamma(\bm{z}_i) = \frac{1}{p(\bm{X})}\alpha(\bm{z}_i)\beta(\bm{z}_i)
 		#p(\bm{X}) = \sum_{\bm{z}_j\in Supp(\bm{z})}\alpha(\bm{z}_i)\beta(\bm{z}_i)
@@ -356,16 +274,21 @@ class GaussianHMM(HMM) :
 			raise
 		K = gammas.shape[1]
 		log_space = kwargs.get('log_space',False)
+		eps = np.finfo(gammas.dtype).eps
 		#(K,N)*(N,D)=(K,D)
 		if log_space :
-			self.emissions['means'] = np.exp(gammas).T.dot(X)/np.sum(np.exp(gammas),axis=0)[:,np.newaxis]
+			denom = np.sum(np.exp(gammas),axis=0) + 10*eps
+			self.emissions['means'] = np.exp(gammas).T.dot(X)/denom[:,np.newaxis]
 		else :
 			self.emissions['means'] = gammas.T.dot(X)/np.sum(gammas,axis=0)[:,np.newaxis]
 		for k in range(K) :
 			x_mu = X - self.emissions['means'][k,:] #(N,D) - (D,) = (N,D)
 			if log_space :
 				outer_prod = (np.exp(gammas[:,k])*x_mu.T).dot(x_mu)
-				self.emissions['covs'][k,:,:] = outer_prod/np.sum(np.exp(gammas[:,k]))
+				denom = np.sum(np.exp(gammas[:,k])) + 10*eps
+				cov = outer_prod/denom
+				cov[np.diag_indices_from(cov)] += 1e-6
+				self.emissions['covs'][k,:,:] = cov
 			else :
 				outer_prod = (gammas[:,k]*x_mu.T).dot(x_mu)
 				self.emissions['covs'][k,:,:] = outer_prod/np.sum(gammas[:,k])
@@ -409,7 +332,7 @@ def main() :
 	X2 = np.random.multivariate_normal(mean=b['means'][1,:],cov=b['covs'][1,:,:],size=300)
 	X3 = np.random.multivariate_normal(mean=b['means'][2,:],cov=b['covs'][2,:,:],size=300)
 	X = np.concatenate((X1,X2,X3))
-	np.random.shuffle(X)
+	#np.random.shuffle(X)
 	b = {'means':np.array([[-1,1],[0.5,0.5],[-0.87,2.3]],dtype=np.float64),
 	     'covs':np.array([[[1,0],[0,1]],[[1,0],[0,1]],[[1,0],[0,1]]],dtype=np.float64)}
 	g_hmm_l = GaussianHMM(A=A,
@@ -421,6 +344,8 @@ def main() :
 		        emission_params={'log_pdf':True})
 	print(np.exp(g_hmm_l.A))
 	print(g_hmm_l.emissions)
+	print(np.exp(g_hmm_l.posterior_distribution(log_space=True)))
+	#print(g_hmm_l.predictive_distribution(np.random.multivariate_normal(mean=b['means'][2,:],cov=b['covs'][2,:,:],size=1)))
 	#"""
 
 if __name__ == '__main__' :
